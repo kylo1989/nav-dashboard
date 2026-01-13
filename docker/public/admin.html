@@ -189,6 +189,36 @@
             font-size: 0.85rem;
             padding: 0.5rem;
         }
+
+        /* 备份面板样式 */
+        .backup-msg {
+            margin-top: 1rem;
+            padding: 0.8rem;
+            border-radius: 8px;
+            display: none;
+        }
+
+        .backup-msg.success {
+            background: rgba(76, 175, 80, 0.2);
+            color: #4caf50;
+        }
+
+        .backup-msg.error {
+            background: rgba(255, 82, 82, 0.2);
+            color: #ff5252;
+        }
+
+        .backup-config-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+
+        @media (max-width: 768px) {
+            .backup-config-grid {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 
@@ -231,6 +261,10 @@
                     <button class="nav-item" data-tab="password">
                         <span>🔑</span>
                         <span>密码设置</span>
+                    </button>
+                    <button class="nav-item" data-tab="backup">
+                        <span>☁️</span>
+                        <span>云端备份</span>
                     </button>
                 </nav>
             </aside>
@@ -433,6 +467,58 @@
                     </div>
                     <div id="passwordFormContainer" class="table-container glass-effect" style="padding: 2rem;">
                         <!-- 密码表单将在切换到此面板时动态生成 -->
+                    </div>
+                </div>
+
+                <!-- 云端备份面板 -->
+                <div id="backupPanel" class="content-panel">
+                    <div class="panel-header">
+                        <h2>☁️ 云端备份 (WebDAV)</h2>
+                    </div>
+                    <div class="backup-config-grid">
+                        <div class="table-container glass-effect" style="padding: 1.5rem;">
+                            <h3 style="margin-bottom: 1rem; color: white;">⚙️ 备份配置</h3>
+                            <div class="form-group">
+                                <label for="webdavUrl">WebDAV 服务器地址</label>
+                                <input type="url" id="webdavUrl" class="form-input" placeholder="https://dav.jianguoyun.com/dav/">
+                            </div>
+                            <div class="form-group">
+                                <label for="webdavUsername">用户名</label>
+                                <input type="text" id="webdavUsername" class="form-input" placeholder="WebDAV 账号">
+                            </div>
+                            <div class="form-group">
+                                <label for="webdavPassword">密码 / 应用令牌</label>
+                                <input type="password" id="webdavPassword" class="form-input" placeholder="******">
+                            </div>
+                            <div class="form-group">
+                                <label for="backupFrequency">自动备份频率</label>
+                                <select id="backupFrequency" class="form-input">
+                                    <option value="off">关闭</option>
+                                    <option value="daily">每天 (凌晨3点)</option>
+                                    <option value="weekly">每周 (周日凌晨3点)</option>
+                                </select>
+                            </div>
+                            <div id="lastBackupStatus" style="margin-bottom: 1rem; font-size: 0.9rem; color: rgba(255,255,255,0.7);">
+                                <!-- 上次备份状态 -->
+                            </div>
+                            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                                <button id="testConnectionBtn" class="btn-secondary">🔗 测试连接</button>
+                                <button id="saveBackupConfigBtn" class="btn-primary">💾 保存配置</button>
+                                <button id="backupNowBtn" class="btn-secondary">📤 立即备份</button>
+                            </div>
+                            <div id="backupMsg" class="backup-msg"></div>
+                        </div>
+
+                        <div class="table-container glass-effect" style="padding: 1.5rem;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                                <h3 style="color: white; margin: 0;">📜 备份列表</h3>
+                                <button id="refreshBackupsBtn" class="btn-icon" title="刷新列表">🔄</button>
+                            </div>
+                            <div id="backupList" style="max-height: 400px; overflow-y: auto;">
+                                <!-- 备份列表将在这里动态生成 -->
+                                <div style="text-align:center; padding:1rem; opacity:0.7;">暂无备份文件</div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -696,6 +782,7 @@
     </script>
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
     <script src="/js/admin.js"></script>
+    <script src="/js/backup.js"></script>
     <script src="/js/data-manager.js"></script>
 </body>
 
