@@ -265,6 +265,41 @@ npm run dev
 
 ---
 
+## 🔄 升级指南
+
+### 从旧版本升级
+
+如果你从旧版本升级，可能需要手动执行数据库迁移。
+
+#### Docker 版升级
+
+新版本服务器启动时会**自动检测并添加新字段**，通常只需：
+
+```bash
+docker-compose pull
+docker-compose up -d
+```
+
+如果遇到 `no such column: click_count` 错误，可手动执行：
+
+```bash
+# 进入容器执行 SQL
+docker exec -it nav-dashboard sqlite3 /app/data/nav.db "ALTER TABLE sites ADD COLUMN click_count INTEGER DEFAULT 0;"
+
+# 重启容器
+docker-compose restart
+```
+
+#### Cloudflare 版升级
+
+在 Cloudflare Dashboard 的 D1 数据库控制台执行：
+
+```sql
+ALTER TABLE sites ADD COLUMN click_count INTEGER DEFAULT 0;
+```
+
+---
+
 ## 📄 许可证
 
 MIT License
