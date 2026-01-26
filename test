@@ -1,199 +1,291 @@
 // ==UserScript==
-// @name         ValtoriaCloud Auto Renew (v3.0 Final Ultimate)
+// @name         Zampto Auto Renew (Full Stable Flow v2.5)
 // @namespace    http://tampermonkey.net/
-// @version      3.0
-// @description  全功能版：24h时间监控 + 拟人化点击 + 状态机持久化 + 后台防休眠
+// @version      2.5
+// @description  完整移植 v2.5 架构：自动续期、延迟锁定、结果优先判定、拟人化操作、UI面板
 // @author       Gemini
-// @match        https://dash.valtoriacloud.xyz/server/manage?id=*
-// @grant        GM_addStyle
-// @grant        GM_setValue
-// @grant        GM_getValue
+// @match        https://dash.zampto.net/server?id=2574*
+// @grant        none
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // --- 1. 核心配置 ---
+    // --- 1. 配置参数 ---
     const CONFIG = {
-        storageKey: 'valtoria_v3_final',
-        threshold: 24,           // 剩余时间小于 24 小时触发
-        checkInterval: 5000,     // 扫描频率（后台会自动降频，不影响）
-        refreshCooldown: 300000, // 24h内若无按钮，每5分钟刷新页面一次
-        btnText: 'Renew Now'
+        targetId: '2574',
+        cleanUrl: 'https://dash.zampto.net/server?id=2574',
+        refreshInterval: 30 * 60 * 1000, // 30分钟无操作自动刷新，防登录失效
+        storageKey: 'zampto_stable_v2_5',
+
+        // 选择器适配 (基于 Zampto 页面特征)
+        btnRenew: 'button:contains("Renew Server"), a:contains("Renew Server")', // 兼容写法
+        btnConfirm: 'button.btn-primary:contains("Confirm"), button:contains("Renew")', // 假设点击后有确认弹窗
+        alertSelector: '.alert-danger, .alert-success, .alert', // 结果提示框
+        renewWaitTime: 24 * 60 * 60 * 1000 // 设定为24小时续期一次
     };
 
-    // --- 2. 状态机初始化 ---
+    // jQuery-like 文本选择器辅助函数 (因为原生 querySelector 不支持 :contains)
+    function findElementByText(selector, text) {
+        const elements = document.querySelectorAll(selector);
+        return Array.from(elements).find(el => el.textContent.trim().includes(text));
+    }
+
+    // --- 2. 初始化数据 ---
     let data = JSON.parse(localStorage.getItem(CONFIG.storageKey)) || {
-        isPaused: false,
+        nextRunTime: 0,
         logs: [],
-        lastRefresh: 0,
+        isPaused: false,
         status: 'idle', // idle, renewing
         retryCount: 0
     };
 
-    // --- 3. UI 界面构建 ---
-    GM_addStyle(`
-        #vt-panel {
+    let isBusy = false; 
+    let refreshTimer = null;
+
+    // --- 3. UI 构建 (完全保留 v2.5 样式) ---
+    const style = document.createElement('style');
+    style.innerHTML = `
+        #kb-panel {
             position: fixed; bottom: 10px; right: 10px; width: 380px;
-            background: #111; color: #ddd; z-index: 999999;
-            border: 1px solid #333; border-radius: 10px; padding: 15px;
-            font-family: 'Segoe UI', Consolas, monospace; font-size: 12px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+            background: #080808; color: #ccc; z-index: 999999;
+            border: 1px solid #333; border-radius: 6px; padding: 10px;
+            font-family: monospace; font-size: 12px;
+            box-shadow: 0 -5px 20px rgba(0,0,0,0.9);
         }
-        #vt-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #444; padding-bottom: 10px; margin-bottom: 10px; }
-        .vt-tag { background: #6f42c1; color: #fff; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 10px; }
-        .vt-status-box { background: #1e1e1e; padding: 10px; border-radius: 6px; margin-bottom: 10px; border-left: 4px solid #6f42c1; }
-        .vt-btn { cursor: pointer; border: none; padding: 6px 15px; border-radius: 4px; font-weight: bold; transition: 0.3s; }
-        .btn-pause { background: #e67e22; color: #fff; }
-        .btn-resume { background: #27ae60; color: #fff; }
-        #vt-logs { height: 160px; overflow-y: auto; background: #000; border: 1px solid #222; padding: 8px; margin-top: 10px; border-radius: 4px; line-height: 1.5; }
-        .log-time { color: #666; font-size: 10px; margin-right: 5px; }
-        .log-info { color: #3498db; }
-        .log-success { color: #2ecc71; font-weight: bold; }
-        .log-warn { color: #f1c40f; }
-        .log-error { color: #e74c3c; }
-    `);
+        #kb-header { display: flex; justify-content: space-between; margin-bottom: 8px; border-bottom: 1px solid #333; padding-bottom: 5px; }
+        .kb-btn { cursor: pointer; border: none; padding: 5px 10px; border-radius: 3px; font-weight: bold; margin-right: 5px; }
+        .kb-btn-run { background: #198754; color: white; }
+        .kb-btn-pause { background: #ffc107; color: black; }
+        #kb-logs { height: 160px; overflow-y: auto; background: #000; border: 1px solid #333; margin-top: 8px; padding: 5px; }
+        .log-time { color: #555; margin-right: 5px; }
+        .log-step { color: #6f42c1; font-weight: bold; border-left: 3px solid #6f42c1; padding-left: 5px; display: block; margin-top: 2px;}
+        .log-warn { color: #ffc107; }
+        .log-success { color: #198754; }
+        .log-error { color: #dc3545; background: rgba(220, 53, 69, 0.1); }
+    `;
+    document.head.appendChild(style);
 
     const panel = document.createElement('div');
-    panel.id = 'vt-panel';
+    panel.id = 'kb-panel';
     panel.innerHTML = `
-        <div id="vt-header">
-            <span><span class="vt-tag">V3.0 FINAL</span> 自动续期面板</span>
-            <span id="vt-running-indicator" style="color:#2ecc71;">● RUNNING</span>
+        <div id="kb-header">
+            <span style="color:#6f42c1;">⚓ Zampto V2.5 (Stable)</span>
+            <button id="kb-hide" style="background:none;border:none;color:#666;cursor:pointer;">[-]</button>
         </div>
-        <div class="vt-status-box">
-            <div>⏰ 剩余时间: <span id="vt-time-val" style="color:#f1c40f; font-weight:bold;">--</span></div>
-            <div>📡 引擎状态: <span id="vt-engine-status">检查中...</span></div>
+        <div id="kb-content">
+            <div id="kb-status" style="margin-bottom:8px; padding:5px; background:#222;">初始化...</div>
+            <div>
+                <button id="kb-manual" class="kb-btn kb-btn-run">重置并运行</button>
+                <button id="kb-pause" class="kb-btn kb-btn-pause">暂停</button>
+            </div>
+            <div id="kb-logs"></div>
         </div>
-        <div style="display:flex; gap:10px;">
-            <button id="vt-toggle" class="vt-btn ${data.isPaused ? 'btn-resume' : 'btn-pause'}">${data.isPaused ? '恢复运行' : '暂停脚本'}</button>
-            <button id="vt-reset" class="vt-btn" style="background:#444; color:#ccc;">清空日志</button>
-        </div>
-        <div id="vt-logs"></div>
     `;
     document.body.appendChild(panel);
 
-    // --- 4. 工具函数 ---
-    function save() { localStorage.setItem(CONFIG.storageKey, JSON.stringify(data)); }
+    const ui = {
+        status: document.getElementById('kb-status'),
+        logs: document.getElementById('kb-logs'),
+        btnManual: document.getElementById('kb-manual'),
+        btnPause: document.getElementById('kb-pause'),
+        btnHide: document.getElementById('kb-hide'),
+        content: document.getElementById('kb-content')
+    };
 
-    function addLog(msg, type = 'info') {
-        const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    // --- 4. 工具函数 ---
+    function saveData() { localStorage.setItem(CONFIG.storageKey, JSON.stringify(data)); }
+
+    function log(msg, type = 'info') {
+        const time = new Date().toLocaleTimeString('en-GB');
         data.logs.unshift({ time, msg, type });
         if (data.logs.length > 50) data.logs.pop();
-        save();
+        saveData();
         renderLogs();
     }
 
     function renderLogs() {
-        document.getElementById('vt-logs').innerHTML = data.logs.map(l => 
+        ui.logs.innerHTML = data.logs.map(l =>
             `<div><span class="log-time">[${l.time}]</span><span class="log-${l.type}">${l.msg}</span></div>`
         ).join('');
     }
 
-    async function sleep(min, max) {
+    function updateStatus(text, color = '#fff') {
+        ui.status.innerHTML = text;
+        ui.status.style.color = color;
+    }
+
+    function formatTime(ms) {
+        if (ms <= 0) return "00:00:00";
+        const h = Math.floor(ms / 3600000);
+        const m = Math.floor((ms % 3600000) / 60000);
+        const s = Math.floor((ms % 60000) / 1000);
+        return `${h}h ${m}m ${s}s`;
+    }
+
+    function isVisible(elem) {
+        return !!(elem && (elem.offsetWidth || elem.offsetHeight || elem.getClientRects().length));
+    }
+
+    function sleep(min, max) {
         const ms = Math.floor(Math.random() * (max - min + 1) + min);
         return new Promise(r => setTimeout(r, ms));
     }
 
-    // --- 5. 核心逻辑引擎 ---
-    function parseRemainingTime() {
-        const text = document.body.innerText;
-        // 匹配 47h 59m remaining 这种格式
-        const match = text.match(/(\d+)h\s+(\d+)m\s+remaining/i);
-        if (match) return { hours: parseInt(match[1]), minutes: parseInt(match[2]) };
-        return null;
+    function simulateClick(element) {
+        if(!element) return;
+        ['mouseover', 'mousedown', 'mouseup', 'click'].forEach(eventType => {
+            element.dispatchEvent(new MouseEvent(eventType, { bubbles: true, cancelable: true, view: window }));
+        });
     }
 
-    async function mainEngine() {
-        if (data.isPaused) {
-            document.getElementById('vt-running-indicator').innerText = "○ PAUSED";
-            document.getElementById('vt-running-indicator').style.color = "#888";
-            return;
-        }
+    // --- 5. 核心逻辑 ---
 
-        const timeData = parseRemainingTime();
-        const displayTime = document.getElementById('vt-time-val');
-        const displayStatus = document.getElementById('vt-engine-status');
+    function handleResultState() {
+        isBusy = true;
+        data.status = 'idle';
+        data.retryCount = 0;
+        log("🔍 结算结果中...", "step");
 
-        // 第一步：探测按钮 (只要按钮在，说明满足续期条件)
-        const btn = Array.from(document.querySelectorAll('button, a'))
-                         .find(el => el.textContent.includes(CONFIG.btnText) && el.offsetWidth > 0);
-
-        if (btn) {
-            displayStatus.innerText = "发现按钮，准备点击";
-            displayStatus.style.color = "#2ecc71";
-            
-            // 拟人化延迟 2-5 秒
-            addLog("🎯 探测到 Renew Now，拟人化等待中...", "info");
-            await sleep(2000, 5000);
-            
-            addLog("🚀 执行点击操作！", "success");
-            btn.click();
-            
-            // 点击后锁定状态，等待页面刷新
-            data.isPaused = true;
-            save();
-            setTimeout(() => { location.reload(); }, 5000);
-            return;
-        }
-
-        // 第二步：如果没按钮，解析时间文本
-        if (timeData) {
-            displayTime.innerText = `${timeData.hours}h ${timeData.minutes}m`;
-            
-            if (timeData.hours < CONFIG.threshold) {
-                displayStatus.innerText = "进入 24h 窗口，等待按钮...";
-                displayStatus.style.color = "#f1c40f";
-                
-                // 长时间按钮不出则刷新
-                const now = Date.now();
-                if (now - data.lastRefresh > CONFIG.refreshCooldown) {
-                    addLog("⏳ 时间达标但按钮未见，尝试刷新页面...", "warn");
-                    data.lastRefresh = now;
-                    save();
-                    location.reload();
-                }
+        const alertBox = document.querySelector(CONFIG.alertSelector);
+        if (alertBox && isVisible(alertBox)) {
+            const text = alertBox.innerText.toLowerCase();
+            if (text.includes("success") || text.includes("renewed")) {
+                data.nextRunTime = Date.now() + CONFIG.renewWaitTime;
+                log("✅ 续期成功! 24小时后再次运行", "success");
+            } else if (text.includes("captcha")) {
+                log("❌ 验证码错误，10分钟后重试", "error");
+                data.nextRunTime = Date.now() + (10 * 60 * 1000);
             } else {
-                displayStatus.innerText = "时间充裕，静默监控中";
-                displayStatus.style.color = "#888";
+                log("⚠️ 收到提示，推迟1小时自检", "warn");
+                data.nextRunTime = Date.now() + (60 * 60 * 1000);
             }
         } else {
-            displayTime.innerText = "未检测到时间";
-            displayStatus.innerText = "正在扫描页面...";
+            // 如果没看到提示框但页面变了，默认设定为成功
+            log("✅ 未见异常，设定24h后重试", "success");
+            data.nextRunTime = Date.now() + CONFIG.renewWaitTime;
         }
+
+        saveData();
+        log("🔄 3秒后刷新页面以重置...", "step");
+        setTimeout(() => { window.location.href = CONFIG.cleanUrl; }, 3000);
+    }
+
+    async function loop() {
+        if (data.isPaused) { updateStatus("🔴 已暂停", "#ff4444"); return; }
+        if (isBusy) { updateStatus("⚙️ 运行中...", "#6f42c1"); return; }
+
+        const now = Date.now();
+        const diff = data.nextRunTime - now;
+
+        if (diff > 0) {
+            updateStatus(`⏳ 倒计时: ${formatTime(diff)}`);
+            if (!refreshTimer && diff > 600000) {
+                refreshTimer = setTimeout(() => {
+                    if(!isBusy && !data.isPaused) location.reload();
+                }, CONFIG.refreshInterval);
+            }
+            return;
+        }
+
+        await executeRenew();
+    }
+
+    async function executeRenew() {
+        isBusy = true;
+        if (refreshTimer) clearTimeout(refreshTimer);
+
+        log("👀 正在观察页面 (5s)...", "step");
+        await sleep(5000, 6000);
+
+        data.status = 'renewing';
+        data.nextRunTime = Date.now() + (15 * 60 * 1000); // 15分钟安全锁
+        saveData();
+
+        // 1. 查找并点击 Renew Server 按钮
+        const btn1 = findElementByText('button, a', "Renew Server");
+        
+        if (!btn1) {
+            log("❌ 找不到 Renew 按钮，尝试刷新", "error");
+            isBusy = false;
+            data.status = 'idle';
+            saveData();
+            setTimeout(() => location.reload(), 3000);
+            return;
+        }
+
+        log("🖱️ 点击 Renew Server...", "info");
+        simulateClick(btn1);
+        log("✅ (1/2) 点击完成", "success");
+
+        // 2. 随机等待并检查是否有确认弹窗 (拟人化)
+        const waitTime = Math.floor(Math.random() * (4000 - 2000 + 1) + 2000);
+        log(`⏳ (2/2) 等待渲染...`, "step");
+        await sleep(waitTime, waitTime + 1000);
+
+        // 检查是否有确认按钮 (针对部分面板的二级确认)
+        const btn2 = findElementByText('button.btn-primary', "Confirm") || findElementByText('button', "Renew");
+        if (btn2 && isVisible(btn2)) {
+            log("🚀 提交二级确认...", "step");
+            simulateClick(btn2);
+        }
+
+        // 等待跳转或结果
+        await sleep(3000, 4000);
+        handleResultState();
     }
 
     // --- 6. 事件绑定 ---
-    document.getElementById('vt-toggle').addEventListener('click', function() {
-        data.isPaused = !data.isPaused;
-        this.innerText = data.isPaused ? '恢复运行' : '暂停脚本';
-        this.className = `vt-btn ${data.isPaused ? 'btn-resume' : 'btn-pause'}`;
-        addLog(data.isPaused ? "⏸ 脚本手动暂停" : "▶️ 脚本恢复工作", "info");
-        save();
-    });
-
-    document.getElementById('vt-reset').addEventListener('click', () => {
-        data.logs = [];
-        save();
-        renderLogs();
-    });
-
-    // --- 7. 防休眠补丁 (针对后台运行) ---
-    // 通过微小的 DOM 活动尝试维持标签页活跃
-    setInterval(() => {
-        if (!data.isPaused) {
-            const dot = document.createElement('div');
-            dot.style.cssText = "width:1px;height:1px;position:fixed;bottom:0;right:0;opacity:0.01;";
-            document.body.appendChild(dot);
-            setTimeout(() => dot.remove(), 1000);
+    ui.btnManual.addEventListener('click', () => {
+        if(confirm("确定要重置脚本状态并立即运行吗？")) {
+            data.logs = [];
+            data.nextRunTime = 0;
+            data.isPaused = false;
+            data.status = 'idle';
+            data.retryCount = 0;
+            saveData();
+            window.location.href = CONFIG.cleanUrl;
         }
-    }, 30000);
+    });
 
-    // --- 8. 启动脚本 ---
+    ui.btnPause.addEventListener('click', () => {
+        data.isPaused = !data.isPaused;
+        ui.btnPause.innerText = data.isPaused ? "恢复" : "暂停";
+        saveData();
+    });
+
+    ui.btnHide.addEventListener('click', () => {
+        ui.content.style.display = ui.content.style.display === 'none' ? 'block' : 'none';
+        ui.btnHide.innerText = ui.content.style.display === 'none' ? '[+]' : '[-]';
+    });
+
+    // --- 7. 启动 ---
+    ui.btnPause.innerText = data.isPaused ? "恢复" : "暂停";
     renderLogs();
-    addLog("✅ Valtoria v3.0 Final 加载成功", "info");
-    
-    // 启动主循环
-    setInterval(mainEngine, CONFIG.checkInterval);
+    log("🤖 Zampto v2.5 Stable 已加载", "info");
+
+    // 结果页判定逻辑
+    const currentUrl = window.location.href;
+    const alertBox = document.querySelector(CONFIG.alertSelector);
+    if (alertBox && isVisible(alertBox) && data.status === 'renewing') {
+        handleResultState();
+    } else if (data.status === 'renewing') {
+        // 异常恢复逻辑
+        if (data.retryCount < 3) {
+            log(`🚑 异常中断恢复 (第${data.retryCount + 1}次)`, "warn");
+            data.status = 'idle';
+            data.nextRunTime = 0;
+            data.retryCount++;
+            saveData();
+        } else {
+            log("❌ 多次重试失败，进入暂停状态", "error");
+            data.isPaused = true;
+            data.status = 'idle';
+            saveData();
+        }
+    }
+
+    setInterval(loop, 1000);
+    loop();
 
 })();
