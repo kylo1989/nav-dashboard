@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Zampto Auto Renew (Stable Flow v2.7)
+// @name         Zampto Auto Renew (Stable Flow v2.9)
 // @namespace    http://tampermonkey.net/
-// @version      2.7
-// @description  修复时间抓取异常：精准过滤 HTML 标签，确保日志只显示 Expiry 时间
+// @version      2.9
+// @description  严格24小时续期：点击后读取剩余时间，成功则进入24h冷却，失败则刷新重试
 // @author       Gemini
 // @match        https://dash.zampto.net/server?id=2574*
 // @grant        none
@@ -11,15 +11,16 @@
 (function() {
     'use strict';
 
+    // --- 1. 配置参数 ---
     const CONFIG = {
         targetId: '2574',
         cleanUrl: 'https://dash.zampto.net/server?id=2574',
-        refreshInterval: 30 * 60 * 1000, 
-        storageKey: 'zampto_stable_v2_7',
+        storageKey: 'zampto_stable_v2_9',
         btnRenewText: "Renew Server",
-        renewWaitTime: 24 * 60 * 60 * 1000 
+        renewInterval: 24 * 60 * 60 * 1000 // 严格 24 小时冷却
     };
 
+    // --- 2. 初始化数据 ---
     let data = JSON.parse(localStorage.getItem(CONFIG.storageKey)) || {
         nextRunTime: 0,
         logs: [],
@@ -30,39 +31,43 @@
 
     let isBusy = false;
 
-    // --- 工具函数：精准提取时间 ---
-    function getCleanExpiryText() {
-        // 查找包含 "Expiry" 且不包含 "function" 或 "script" 的可见元素
+    // --- 3. 核心工具：精准提取时间 ---
+    function getCleanExpiryMinutes() {
         const elements = Array.from(document.querySelectorAll('p, div, span, li'));
+        // 寻找包含 Expiry 且不含脚本关键字的可见文本
         const target = elements.find(el => 
             el.textContent.includes('Expiry') && 
             !el.textContent.includes('function') && 
-            el.children.length < 5 // 排除大型容器
+            el.innerText.length < 100
         );
         
-        if (!target) return "未知时间";
+        if (!target) return 0;
+
+        const text = target.innerText || target.textContent;
+        let totalMinutes = 0;
         
-        // 只提取 Expiry 所在的那一行文字，去掉可能的子脚本内容
-        let rawText = target.innerText || target.textContent;
-        let cleanText = rawText.split('\n')[0].trim(); 
-        return cleanText;
+        // 解析天、时、分
+        const d = text.match(/(\d+)\s*day/);
+        const h = text.match(/(\d+)\s*h/);
+        const m = text.match(/(\d+)\s*m/);
+        
+        if (d) totalMinutes += parseInt(d[1]) * 1440;
+        if (h) totalMinutes += parseInt(h[1]) * 60;
+        if (m) totalMinutes += parseInt(m[1]);
+        
+        return totalMinutes;
     }
 
-    function parseToMinutes(text) {
-        let total = 0;
-        const dayMatch = text.match(/(\d+)\s*day/);
-        const hourMatch = text.match(/(\d+)\s*h/);
-        const minMatch = text.match(/(\d+)\s*m/);
-        if (dayMatch) total += parseInt(dayMatch[1]) * 1440;
-        if (hourMatch) total += parseInt(hourMatch[1]) * 60;
-        if (minMatch) total += parseInt(minMatch[1]);
-        return total;
+    function getExpiryText() {
+        const elements = Array.from(document.querySelectorAll('p, div, span, li'));
+        const target = elements.find(el => el.textContent.includes('Expiry') && !el.textContent.includes('function') && el.innerText.length < 100);
+        return target ? target.innerText.split('\n')[0].trim() : "未知";
     }
 
-    // --- UI 构建 (保持一致) ---
+    // --- 4. UI 构建 ---
     const style = document.createElement('style');
     style.innerHTML = `
-        #kb-panel { position: fixed; bottom: 10px; right: 10px; width: 380px; background: #080808; color: #ccc; z-index: 999999; border: 1px solid #333; border-radius: 6px; padding: 10px; font-family: monospace; font-size: 12px; box-shadow: 0 -5px 20px rgba(0,0,0,0.9); }
+        #kb-panel { position: fixed; bottom: 10px; right: 10px; width: 380px; background: #080808; color: #ccc; z-index: 999999; border: 1px solid #333; border-radius: 6px; padding: 10px; font-family: monospace; font-size: 12px; }
         #kb-header { display: flex; justify-content: space-between; margin-bottom: 8px; border-bottom: 1px solid #333; padding-bottom: 5px; }
         .kb-btn { cursor: pointer; border: none; padding: 5px 10px; border-radius: 3px; font-weight: bold; margin-right: 5px; }
         .kb-btn-run { background: #198754; color: white; }
@@ -71,17 +76,17 @@
         .log-time { color: #555; margin-right: 5px; }
         .log-step { color: #6f42c1; font-weight: bold; border-left: 3px solid #6f42c1; padding-left: 5px; display: block; margin-top: 2px;}
         .log-success { color: #198754; font-weight: bold; }
-        .log-error { color: #dc3545; }
+        .log-warn { color: #ffc107; }
     `;
     document.head.appendChild(style);
 
     const panel = document.createElement('div');
     panel.id = 'kb-panel';
     panel.innerHTML = `
-        <div id="kb-header"><span style="color:#6f42c1;">⚓ Zampto V2.7 (Fix Log)</span><button id="kb-hide" style="background:none;border:none;color:#666;cursor:pointer;">[-]</button></div>
+        <div id="kb-header"><span style="color:#6f42c1;">⚓ Zampto V2.9 (24H Timer)</span><button id="kb-hide" style="background:none;border:none;color:#666;cursor:pointer;">[-]</button></div>
         <div id="kb-content">
-            <div id="kb-status" style="margin-bottom:8px; padding:5px; background:#222;">载入中...</div>
-            <div><button id="kb-manual" class="kb-btn kb-btn-run">重置并运行</button><button id="kb-pause" class="kb-btn kb-btn-pause">暂停</button></div>
+            <div id="kb-status" style="margin-bottom:8px; padding:5px; background:#222;">初始化...</div>
+            <div><button id="kb-manual" class="kb-btn kb-btn-run">重置任务</button><button id="kb-pause" class="kb-btn kb-btn-pause">暂停</button></div>
             <div id="kb-logs"></div>
         </div>
     `;
@@ -92,7 +97,6 @@
         logs: document.getElementById('kb-logs'),
         btnManual: document.getElementById('kb-manual'),
         btnPause: document.getElementById('kb-pause'),
-        btnHide: document.getElementById('kb-hide'),
         content: document.getElementById('kb-content')
     };
 
@@ -101,68 +105,72 @@
         data.logs.unshift({ time, msg, type });
         if (data.logs.length > 50) data.logs.pop();
         localStorage.setItem(CONFIG.storageKey, JSON.stringify(data));
-        renderLogs();
-    }
-
-    function renderLogs() {
         ui.logs.innerHTML = data.logs.map(l => `<div><span class="log-time">[${l.time}]</span><span class="log-${l.type}">${l.msg}</span></div>`).join('');
     }
 
+    // --- 5. 核心逻辑 ---
     async function executeRenew() {
+        if (isBusy) return;
         isBusy = true;
-        const currentText = getCleanExpiryText();
-        data.lastExpiryMinutes = parseToMinutes(currentText);
-        
-        log(`📊 当前有效期: ${currentText}`, "info");
-        log("👀 观察并等待加载 (5s)...", "step");
+
+        const beforeMinutes = getCleanExpiryMinutes();
+        log(`📊 点击前剩余时间: ${getExpiryText()}`, "info");
+
+        log("👀 观察期 (5s)...", "step");
         await new Promise(r => setTimeout(r, 5000));
 
         const btn = Array.from(document.querySelectorAll('button, a')).find(el => el.textContent.includes(CONFIG.btnRenewText));
-        
+
         if (btn) {
-            data.status = 'renewing';
-            log("🖱️ 点击续期按钮", "step");
+            log("🖱️ 执行点击续期", "step");
             btn.click();
             
-            log("🚀 等待 12s 同步服务器时间...", "info");
-            await new Promise(r => setTimeout(r, 12000));
-            
-            const postText = getCleanExpiryText();
-            const postMinutes = parseToMinutes(postText);
+            log("🚀 等待 15s 后验证结果...", "info");
+            await new Promise(r => setTimeout(r, 15000));
 
-            if (postMinutes > data.lastExpiryMinutes || postMinutes > 2000) {
-                log(`✅ 续期成功! 新有效期: ${postText}`, "success");
-                data.nextRunTime = Date.now() + CONFIG.renewWaitTime;
-                data.status = 'idle';
+            const afterMinutes = getCleanExpiryMinutes();
+            const afterText = getExpiryText();
+
+            // 判断时间是否增加
+            if (afterMinutes > beforeMinutes) {
+                log(`✅ 续期成功！读取到剩余时间: ${afterText}`, "success");
+                data.nextRunTime = Date.now() + CONFIG.renewInterval;
+                localStorage.setItem(CONFIG.storageKey, JSON.stringify(data));
+                log("🔄 5秒后刷新页面进入 24h 倒计时", "step");
                 setTimeout(() => location.reload(), 5000);
             } else {
-                log("⚠️ 时间未变，可能是面板延迟，5分钟后重试", "warn");
-                data.nextRunTime = Date.now() + (5 * 60 * 1000);
-                data.status = 'idle';
+                log("⚠️ 时间未增加，点击可能无效，准备刷新重试", "warn");
                 isBusy = false;
+                setTimeout(() => location.reload(), 3000);
             }
         } else {
-            log("❌ 未找到按钮，尝试刷新", "error");
+            log("❌ 找不到按钮，尝试刷新页面", "error");
             location.reload();
         }
     }
 
     function loop() {
-        if (data.isPaused || isBusy) return;
+        if (data.isPaused) { ui.status.innerHTML = "🔴 脚本已暂停"; return; }
+        
         const now = Date.now();
         const diff = data.nextRunTime - now;
+
         if (diff > 0) {
-            ui.status.innerHTML = `⏳ 倒计时: ${Math.floor(diff/3600000)}h ${Math.floor((diff%3600000)/60000)}m ${Math.floor((diff%60000)/1000)}s`;
+            const h = Math.floor(diff / 3600000);
+            const m = Math.floor((diff % 3600000) / 60000);
+            const s = Math.floor((diff % 60000) / 1000);
+            ui.status.innerHTML = `⏳ 下次续期倒计时: ${h}h ${m}m ${s}s`;
             return;
         }
+
+        ui.status.innerHTML = "⚙️ 正在执行 24h 定时续期...";
         executeRenew();
     }
 
     ui.btnManual.addEventListener('click', () => { data.nextRunTime = 0; data.logs = []; location.reload(); });
     ui.btnPause.addEventListener('click', () => { data.isPaused = !data.isPaused; ui.btnPause.innerText = data.isPaused ? "恢复" : "暂停"; });
-    ui.btnHide.addEventListener('click', () => { ui.content.style.display = ui.content.style.display === 'none' ? 'block' : 'none'; });
+    document.getElementById('kb-hide').onclick = () => { ui.content.style.display = ui.content.style.display === 'none' ? 'block' : 'none'; };
 
-    renderLogs();
-    log("🤖 Zampto v2.7 就绪 (已修复抓取逻辑)", "info");
+    log("🤖 Zampto v2.9 已就绪 (24H 模式)", "info");
     setInterval(loop, 1000);
 })();
