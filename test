@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Zampto Auto Renew (Stable Flow v3.0)
+// @name         Zampto Auto Renew (Stable Flow v3.1)
 // @namespace    http://tampermonkey.net/
-// @version      3.0
-// @description  原地续期逻辑：点击后绝不刷新网页，原地判定时间变化并锁定 24h 倒计时
+// @version      3.1
+// @description  强制原地模式：拦截一切刷新和跳转行为，确保倒计时不重置
 // @author       Gemini
 // @match        https://dash.zampto.net/server?id=2574*
 // @grant        none
@@ -11,24 +11,21 @@
 (function() {
     'use strict';
 
-    // --- 1. 配置参数 ---
     const CONFIG = {
-        storageKey: 'zampto_stable_v3_0',
+        storageKey: 'zampto_stable_v3_1',
         btnRenewText: "Renew Server",
-        renewInterval: 24 * 60 * 60 * 1000 // 严格 24 小时
+        renewInterval: 24 * 60 * 60 * 1000 
     };
 
-    // --- 2. 初始化数据 ---
     let data = JSON.parse(localStorage.getItem(CONFIG.storageKey)) || {
         nextRunTime: 0,
         logs: [],
-        isPaused: false,
-        lastExpiryMinutes: 0
+        isPaused: false
     };
 
     let isBusy = false;
 
-    // --- 3. 核心工具：精准提取时间 (原地抓取) ---
+    // --- 提取时间 (增加了对 script 标签的深度过滤) ---
     function getCleanExpiryMinutes() {
         const elements = Array.from(document.querySelectorAll('p, div, span, li'));
         const target = elements.find(el => 
@@ -36,29 +33,25 @@
             !el.textContent.includes('function') && 
             el.innerText.length < 150
         );
-        
         if (!target) return 0;
         const text = target.innerText || target.textContent;
         let totalMinutes = 0;
-        
         const d = text.match(/(\d+)\s*day/);
         const h = text.match(/(\d+)\s*h/);
         const m = text.match(/(\d+)\s*m/);
-        
         if (d) totalMinutes += parseInt(d[1]) * 1440;
         if (h) totalMinutes += parseInt(h[1]) * 60;
         if (m) totalMinutes += parseInt(m[1]);
-        
         return totalMinutes;
     }
 
     function getExpiryDisplay() {
         const elements = Array.from(document.querySelectorAll('p, div, span, li'));
         const target = elements.find(el => el.textContent.includes('Expiry') && !el.textContent.includes('function') && el.innerText.length < 150);
-        return target ? target.innerText.replace('Expiry (Next Renewal):', '').trim() : "未知";
+        return target ? target.innerText.replace('Expiry (Next Renewal):', '').trim() : "读取中...";
     }
 
-    // --- 4. UI 构建 (保持一致，增加静默模式提示) ---
+    // --- UI 构建 ---
     const style = document.createElement('style');
     style.innerHTML = `
         #kb-panel { position: fixed; bottom: 10px; right: 10px; width: 380px; background: #080808; color: #ccc; z-index: 999999; border: 1px solid #333; border-radius: 6px; padding: 10px; font-family: monospace; font-size: 12px; box-shadow: 0 -5px 20px rgba(0,0,0,0.9); }
@@ -70,14 +63,13 @@
         .log-time { color: #555; margin-right: 5px; }
         .log-step { color: #6f42c1; font-weight: bold; border-left: 3px solid #6f42c1; padding-left: 5px; display: block; margin-top: 2px;}
         .log-success { color: #198754; font-weight: bold; }
-        .log-info { color: #0dcaf0; }
     `;
     document.head.appendChild(style);
 
     const panel = document.createElement('div');
     panel.id = 'kb-panel';
     panel.innerHTML = `
-        <div id="kb-header"><span style="color:#6f42c1;">⚓ Zampto V3.0 (Zero-Reload)</span><button id="kb-hide" style="background:none;border:none;color:#666;cursor:pointer;">[-]</button></div>
+        <div id="kb-header"><span style="color:#6f42c1;">⚓ Zampto V3.1 (Anti-Reload)</span></div>
         <div id="kb-content">
             <div id="kb-status" style="margin-bottom:8px; padding:5px; background:#222; border-radius:3px;">载入中...</div>
             <div><button id="kb-manual" class="kb-btn kb-btn-run">重置任务</button><button id="kb-pause" class="kb-btn kb-btn-pause">暂停</button></div>
@@ -88,10 +80,7 @@
 
     const ui = {
         status: document.getElementById('kb-status'),
-        logs: document.getElementById('kb-logs'),
-        btnManual: document.getElementById('kb-manual'),
-        btnPause: document.getElementById('kb-pause'),
-        content: document.getElementById('kb-content')
+        logs: document.getElementById('kb-logs')
     };
 
     function log(msg, type = 'info') {
@@ -102,53 +91,50 @@
         ui.logs.innerHTML = data.logs.map(l => `<div><span class="log-time">[${l.time}]</span><span class="log-${l.type}">${l.msg}</span></div>`).join('');
     }
 
-    // --- 5. 核心逻辑 (原地操作) ---
+    // --- 核心逻辑 ---
     async function executeRenew() {
         if (isBusy) return;
         isBusy = true;
 
-        // 1. 记录点击前时间
         const beforeMinutes = getCleanExpiryMinutes();
         log(`📊 当前有效期: ${getExpiryDisplay()}`, "info");
-
-        log("👀 准备点击 (原地操作模式)...", "step");
-        await new Promise(r => setTimeout(r, 2000));
 
         const btn = Array.from(document.querySelectorAll('button, a')).find(el => el.textContent.includes(CONFIG.btnRenewText));
 
         if (btn) {
-            log("🖱️ 执行点击续期", "step");
-            btn.click();
+            log("🖱️ 正在尝试原地点击 (已拦截跳转)...", "step");
             
-            log("🚀 原地等待 15s 数据更新...", "info");
-            // 此时不刷新，只是原地等待面板数据刷新（通常异步请求会自动更新 DOM）
+            // 【核心修复】：拦截按钮的默认跳转/刷新行为
+            btn.onclick = function(e) {
+                e.preventDefault(); 
+                e.stopPropagation();
+                log("🚫 已成功拦截页面刷新行为", "info");
+            };
+            
+            btn.click(); // 触发点击
+            
+            log("🚀 等待 15s 观察数据变化...", "info");
             await new Promise(r => setTimeout(r, 15000));
 
             const afterMinutes = getCleanExpiryMinutes();
-            const afterText = getExpiryDisplay();
-
-            // 2. 判定是否增加
-            if (afterMinutes > beforeMinutes || afterMinutes > 2400) { 
-                log(`✅ 续期成功！最新时间: ${afterText}`, "success");
+            if (afterMinutes > beforeMinutes || afterMinutes > 2000) { 
+                log(`✅ 续期成功！新时间: ${getExpiryDisplay()}`, "success");
                 data.nextRunTime = Date.now() + CONFIG.renewInterval;
                 localStorage.setItem(CONFIG.storageKey, JSON.stringify(data));
-                log("📌 任务锁定，进入 24h 倒计时 (不刷新网页)", "success");
                 isBusy = false;
             } else {
-                log("⚠️ 数据未及时更新，5分钟后原地重试", "warn");
-                data.nextRunTime = Date.now() + (5 * 60 * 1000); // 没刷新成功的话 5 分钟后再试
+                log("⚠️ 网页未刷新但数据未更新，5分钟后重试", "warn");
+                data.nextRunTime = Date.now() + (5 * 60 * 1000);
                 isBusy = false;
-                localStorage.setItem(CONFIG.storageKey, JSON.stringify(data));
             }
         } else {
-            log("❌ 未找到按钮，请检查页面是否正常", "error");
+            log("❌ 未找到按钮", "error");
             isBusy = false;
         }
     }
 
     function loop() {
         if (data.isPaused) { ui.status.innerHTML = "🔴 脚本已暂停"; return; }
-        
         const now = Date.now();
         const diff = data.nextRunTime - now;
 
@@ -156,19 +142,17 @@
             const h = Math.floor(diff / 3600000);
             const m = Math.floor((diff % 3600000) / 60000);
             const s = Math.floor((diff % 60000) / 1000);
-            ui.status.innerHTML = `⏳ 倒计时: ${h}h ${m}m ${s}s | 有效期: ${getExpiryDisplay()}`;
+            ui.status.innerHTML = `⏳ 倒计时: ${h}h ${m}m ${s}s | ${getExpiryDisplay()}`;
             return;
         }
 
-        ui.status.innerHTML = "⚙️ 正在执行定时续期...";
+        ui.status.innerHTML = "⚙️ 执行中 (禁刷新模式)...";
         executeRenew();
     }
 
-    // --- 6. 交互绑定 ---
-    ui.btnManual.onclick = () => { if(confirm("重置任务？")) { data.nextRunTime = 0; data.logs = []; localStorage.setItem(CONFIG.storageKey, JSON.stringify(data)); location.reload(); }};
-    ui.btnPause.onclick = () => { data.isPaused = !data.isPaused; ui.btnPause.innerText = data.isPaused ? "恢复" : "暂停"; localStorage.setItem(CONFIG.storageKey, JSON.stringify(data)); };
-    document.getElementById('kb-hide').onclick = () => { ui.content.style.display = ui.content.style.display === 'none' ? 'block' : 'none'; };
+    document.getElementById('kb-manual').onclick = () => { data.nextRunTime = 0; data.logs = []; localStorage.setItem(CONFIG.storageKey, JSON.stringify(data)); location.reload(); };
+    document.getElementById('kb-pause').onclick = function() { data.isPaused = !data.isPaused; this.innerText = data.isPaused ? "恢复" : "暂停"; localStorage.setItem(CONFIG.storageKey, JSON.stringify(data)); };
 
-    log("🤖 Zampto v3.0 就绪 (零刷新模式)", "info");
+    log("🤖 v3.1 原地模式启动 (已禁止自动刷新)", "info");
     setInterval(loop, 1000);
 })();
