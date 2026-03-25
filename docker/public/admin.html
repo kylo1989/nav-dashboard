@@ -276,12 +276,20 @@
                 <div id="sitesPanel" class="content-panel active">
                     <div class="panel-header">
                         <h2>🌐 站点管理</h2>
-                        <div style="display: flex; align-items: center; gap: 1rem;">
+                        <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
                             <input type="text" id="siteSearchInput" class="form-input"
                                 style="width: auto; min-width: 200px;" placeholder="搜索站点..."
-                                oninput="filterSitesBySearch()"><select id="siteCategoryFilter" class="form-input"
+                                oninput="filterSitesBySearch()">
+                            <select id="siteCategoryFilter" class="form-input"
                                 style="width: auto; min-width: 150px;" onchange="filterSitesByCategory()">
                                 <option value="all">📁 全部分类</option>
+                            </select>
+                            <select id="siteStatusFilter" class="form-input"
+                                style="width: auto; min-width: 150px;" onchange="filterSitesByStatus()">
+                                <option value="all">🔍 所有状态</option>
+                                <option value="success">✅ 正常</option>
+                                <option value="failed">❌ 失败</option>
+                                <option value="unchecked">⏳ 未检测</option>
                             </select>
                             <button class="btn-primary" onclick="openSiteModal()">
                                 <span>➕</span>
@@ -290,15 +298,27 @@
                         </div>
                     </div>
 
+                    <div id="bulkActionsBar" style="display: none; margin-bottom: 1rem; padding: 0.8rem 1rem; background: rgba(255,255,255,0.05); border-radius: 8px; align-items: center; gap: 1rem; border: 1px solid rgba(255,255,255,0.1);">
+                        <span id="selectedCount" style="color: white; font-weight: 500;">已选择 0 项</span>
+                        <button class="btn-secondary" onclick="checkSelectedSites()" id="btnCheckSelected">
+                            <span>🔄</span> 检测选中
+                        </button>
+                        <button class="btn-secondary" style="color: #ff6b6b; border-color: rgba(255,107,107,0.3);" onclick="deleteSelectedFailedSites()" id="btnDeleteSelectedFailed">
+                            <span>🗑️</span> 删除选中失败项
+                        </button>
+                    </div>
+
                     <div class="table-container glass-effect">
                         <table class="data-table">
                             <thead>
                                 <tr>
+                                    <th style="width: 40px; text-align: center;"><input type="checkbox" id="selectAllSites" onchange="toggleSelectAllSites()" style="cursor: pointer;"></th>
                                     <th style="width: 40px;"></th>
                                     <th>Logo</th>
                                     <th>名称</th>
                                     <th>URL</th>
                                     <th>分类</th>
+                                    <th>状态</th>
                                     <th>描述</th>
                                     <th>排序</th>
                                     <th>操作</th>
@@ -306,7 +326,7 @@
                             </thead>
                             <tbody id="sitesTableBody">
                                 <tr>
-                                    <td colspan="8" class="loading-row">
+                                    <td colspan="10" class="loading-row">
                                         <div class="loading-spinner"></div>
                                         <span>加载中...</span>
                                     </td>

@@ -10,6 +10,7 @@ let editingSiteId = null;
 let editingCategoryId = null;
 let editingTagId = null;  // 新增：编辑中的标签ID
 let currentCategoryFilter = 'all';  // 当前分类筛选
+let currentStatusFilter = 'all';  // 当前状态筛选
 let currentSearchTerm = '';  // 当前搜索关键词
 
 // 分页状态
@@ -111,6 +112,11 @@ async function loadSites() {
             params.append('category', currentCategoryFilter);
         }
 
+        // 添加状态筛选
+        if (currentStatusFilter !== 'all') {
+            params.append('lastCheckStatus', currentStatusFilter);
+        }
+
         // 添加搜索关键词
         if (currentSearchTerm) {
             params.append('search', currentSearchTerm);
@@ -144,12 +150,14 @@ function renderSitesTable() {
         let msg = '暂无站点数据';
         if (currentSearchTerm) msg = '未找到匹配的站点';
         else if (currentCategoryFilter !== 'all') msg = '该分类下暂无站点';
-        tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 2rem;">${msg}</td></tr>`;
+        else if (currentStatusFilter !== 'all') msg = '该状态下暂无站点';
+        tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; padding: 2rem;">${msg}</td></tr>`;
         return;
     }
 
     tbody.innerHTML = sites.map(site => `
     <tr data-id="${site.id}">
+      <td style="text-align: center;"><input type="checkbox" class="site-checkbox" value="${site.id}" onchange="updateBulkActions()" style="cursor: pointer;"></td>
       <td class="drag-handle" style="cursor: grab; padding: 0.5rem; color: rgba(255,255,255,0.6); font-size: 1.2rem; text-align: center;">⋮⋮</td>
       <td>
         <img src="${site.logo || getDefaultLogo(site.url)}" 
@@ -161,10 +169,12 @@ function renderSitesTable() {
       <td>${escapeHtml(site.name)}</td>
       <td><a href="${site.url}" target="_blank" style="color: var(--primary-color)">${getDomain(site.url)}</a></td>
       <td>${site.category_name || '-'}</td>
+      <td>${renderSiteStatus(site)}</td>
       <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(site.description || '-')}</td>
       <td>${site.sort_order}</td>
       <td>
         <div class="action-buttons">
+          <button class="btn-icon" onclick="checkSite(${site.id})" title="检测可用性">🔄</button>
           <button class="btn-icon" onclick="editSite(${site.id})" title="编辑">✏️</button>
           <button class="btn-icon danger" onclick="deleteSite(${site.id})" title="删除">🗑️</button>
         </div>
@@ -174,6 +184,11 @@ function renderSitesTable() {
 
     // 初始化拖拽排序
     initSortable();
+    
+    // 重置全选状态
+    const selectAll = document.getElementById('selectAllSites');
+    if (selectAll) selectAll.checked = false;
+    updateBulkActions();
 }
 
 // 初始化拖拽排序
@@ -351,6 +366,202 @@ async function deleteSite(id) {
         console.error('删除站点失败:', error);
         showNotification('删除失败', 'error');
     }
+}
+
+// ==================== 站点检测与批量操作 ====================
+
+function filterSitesByStatus() {
+    const select = document.getElementById('siteStatusFilter');
+    currentStatusFilter = select.value;
+    currentPage = 1;
+    loadSites();
+}
+
+function toggleSelectAllSites() {
+    const selectAll = document.getElementById('selectAllSites');
+    const checkboxes = document.querySelectorAll('.site-checkbox');
+    checkboxes.forEach(cb => cb.checked = selectAll.checked);
+    updateBulkActions();
+}
+
+function updateBulkActions() {
+    const checkboxes = document.querySelectorAll('.site-checkbox');
+    const checkedBoxes = document.querySelectorAll('.site-checkbox:checked');
+    const count = checkedBoxes.length;
+    const bar = document.getElementById('bulkActionsBar');
+    const countSpan = document.getElementById('selectedCount');
+    const selectAll = document.getElementById('selectAllSites');
+    const deleteBtn = document.getElementById('btnDeleteSelectedFailed');
+    
+    if (count > 0) {
+        bar.style.display = 'flex';
+        countSpan.textContent = `已选择 ${count} 项`;
+        if (selectAll) selectAll.checked = (count === checkboxes.length);
+
+        if (deleteBtn) {
+            const failedCount = getSelectedSites().filter((site) => site.last_check_status === 'failed').length;
+            const allFailed = failedCount === count;
+            deleteBtn.disabled = !allFailed;
+            deleteBtn.title = allFailed ? '' : '仅当选中的站点全部为失败状态时才能批量删除';
+            deleteBtn.innerHTML = `<span>🗑️</span> 删除选中失败项${failedCount > 0 ? ` (${failedCount})` : ''}`;
+            deleteBtn.style.opacity = allFailed ? '1' : '0.6';
+            deleteBtn.style.cursor = allFailed ? 'pointer' : 'not-allowed';
+        }
+    } else {
+        bar.style.display = 'none';
+        if (selectAll) selectAll.checked = false;
+
+        if (deleteBtn) {
+            deleteBtn.disabled = true;
+            deleteBtn.title = '';
+            deleteBtn.innerHTML = '<span>🗑️</span> 删除选中失败项';
+            deleteBtn.style.opacity = '0.6';
+            deleteBtn.style.cursor = 'not-allowed';
+        }
+    }
+}
+
+function getSelectedSiteIds() {
+    const checkboxes = document.querySelectorAll('.site-checkbox:checked');
+    return Array.from(checkboxes).map(cb => parseInt(cb.value));
+}
+
+function getSelectedSites() {
+    const selectedIds = new Set(getSelectedSiteIds());
+    return sites.filter((site) => selectedIds.has(site.id));
+}
+
+async function checkSelectedSites() {
+    const ids = getSelectedSiteIds();
+    if (ids.length === 0) return;
+    
+    const btn = document.getElementById('btnCheckSelected');
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '<div class="loading-spinner" style="width:14px;height:14px;border-width:2px;margin-right:5px;display:inline-block;vertical-align:middle;"></div> 检测中...';
+    btn.disabled = true;
+    
+    try {
+        const response = await fetch('/api/sites/check-availability', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ siteIds: ids })
+        });
+        const result = await response.json();
+        
+        if (result.success) {
+            const skippedText = result.data.skippedCount > 0 ? `, 跳过 ${result.data.skippedCount}` : '';
+            showNotification(`检测完成: 成功 ${result.data.successCount}, 失败 ${result.data.failedCount}${skippedText}`, 'success');
+            await loadSites();
+        } else {
+            showNotification(result.message || '检测失败', 'error');
+        }
+    } catch (error) {
+        console.error('检测失败:', error);
+        showNotification('检测失败', 'error');
+    } finally {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+    }
+}
+
+async function deleteSelectedFailedSites() {
+    const selectedSites = getSelectedSites();
+    const ids = selectedSites.map((site) => site.id);
+    if (ids.length === 0) return;
+
+    if (!selectedSites.every((site) => site.last_check_status === 'failed')) {
+        showNotification('仅支持批量删除当前选中的失败站点', 'error');
+        return;
+    }
+    
+    if (!confirm(`确定要删除 ${ids.length} 个失败站点吗？此操作不可恢复。`)) return;
+    
+    const btn = document.getElementById('btnDeleteSelectedFailed');
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '<div class="loading-spinner" style="width:14px;height:14px;border-width:2px;margin-right:5px;border-top-color:#ff6b6b;display:inline-block;vertical-align:middle;"></div> 删除中...';
+    btn.disabled = true;
+    
+    try {
+        const response = await fetch('/api/sites/bulk-delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ siteIds: ids })
+        });
+        const result = await response.json();
+        
+        if (result.success) {
+            showNotification(`成功删除 ${result.data.deletedCount} 个失败站点`, 'success');
+            await loadSites();
+        } else {
+            showNotification(result.message || '删除失败', 'error');
+        }
+    } catch (error) {
+        console.error('删除失败:', error);
+        showNotification('删除失败', 'error');
+    } finally {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+    }
+}
+
+async function checkSite(id) {
+    const btn = document.querySelector(`tr[data-id="${id}"] .btn-icon[title="检测可用性"]`);
+    if (btn) {
+        btn.innerHTML = '⏳';
+        btn.disabled = true;
+    }
+    
+    try {
+        const response = await fetch('/api/sites/check-availability', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ siteIds: [id] })
+        });
+        const result = await response.json();
+        
+        if (result.success) {
+            showNotification('检测完成', 'success');
+            await loadSites();
+        } else {
+            showNotification(result.message || '检测失败', 'error');
+            if (btn) {
+                btn.innerHTML = '🔄';
+                btn.disabled = false;
+            }
+        }
+    } catch (error) {
+        console.error('检测失败:', error);
+        showNotification('检测失败', 'error');
+        if (btn) {
+            btn.innerHTML = '🔄';
+            btn.disabled = false;
+        }
+    }
+}
+
+function renderSiteStatus(site) {
+    if (!site.last_check_status || site.last_check_status === 'unchecked') {
+        return '<span style="color: #94a3b8; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 4px;">⏳ 未检测</span>';
+    }
+    
+    const timeStr = site.last_check_at ? new Date(site.last_check_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+    
+    if (site.last_check_status === 'success') {
+        return `<div style="display: flex; flex-direction: column; gap: 2px;">
+            <span style="color: #4ade80; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 4px;">✅ 正常 ${site.last_check_http_status ? `(${site.last_check_http_status})` : ''}</span>
+            <span style="color: rgba(255,255,255,0.4); font-size: 0.75rem;">${timeStr}</span>
+        </div>`;
+    }
+    
+    if (site.last_check_status === 'failed') {
+        const errorMsg = site.last_check_error ? escapeHtml(site.last_check_error).substring(0, 20) + (site.last_check_error.length > 20 ? '...' : '') : '未知错误';
+        return `<div style="display: flex; flex-direction: column; gap: 2px;" title="${escapeHtml(site.last_check_error || '')}">
+            <span style="color: #f87171; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 4px;">❌ 失败 ${site.last_check_http_status ? `(${site.last_check_http_status})` : ''}</span>
+            <span style="color: rgba(255,255,255,0.4); font-size: 0.75rem;">${timeStr ? `${timeStr} · ` : ''}${errorMsg}</span>
+        </div>`;
+    }
+    
+    return '-';
 }
 
 // ==================== 分类管理 ====================
