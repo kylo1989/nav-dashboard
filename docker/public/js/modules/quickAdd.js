@@ -15,9 +15,9 @@ let pendingAdminRedirect = false;
 let pendingAdminWindow = null;
 
 function openAdminPageInNewTab() {
-    const adminWindow = window.open('/admin.html', '_blank');
+    const adminWindow = window.open('about:blank', '_blank');
     if (!adminWindow) {
-        window.location.href = '/admin.html';
+        alert('浏览器拦截了管理后台新标签页，请允许此站点打开弹窗后重试');
         return null;
     }
     return adminWindow;
@@ -99,12 +99,20 @@ export function initEditMode() {
 
             // 如果已经验证过，直接跳转
             if (sessionStorage.getItem('editModeUnlocked') === 'true') {
-                openAdminPageInNewTab();
+                const adminWindow = openAdminPageInNewTab();
+                if (adminWindow) {
+                    adminWindow.location.href = '/admin.html';
+                    adminWindow.focus();
+                }
             } else {
                 // 需要验证密码
                 pendingAdminRedirect = true;
                 pendingQuickAddAction = null;
                 pendingAdminWindow = openAdminPageInNewTab();
+                if (!pendingAdminWindow) {
+                    pendingAdminRedirect = false;
+                    return;
+                }
                 // 延迟显示密码框，避免被 document click 事件关闭
                 setTimeout(() => {
                     showPasswordModal('⚙️ 管理后台', '输入管理密码以进入后台');
